@@ -3,8 +3,7 @@ import io
 import uuid
 import traceback
 
-# Store Hugging Face model cache in RunPod Network Volume
-# Attach a Network Volume to your Serverless Endpoint.
+# Store Hugging Face model cache in RunPod Network Volume.
 CACHE_DIR = os.environ.get("MODEL_CACHE_DIR", "/runpod-volume/huggingface")
 os.environ["HF_HOME"] = CACHE_DIR
 os.environ["HF_HUB_CACHE"] = CACHE_DIR
@@ -12,13 +11,20 @@ os.environ["TRANSFORMERS_CACHE"] = CACHE_DIR
 
 import runpod
 import torch
+
+# Compatibility fix for diffusers/torch combinations where torch.xpu is missing.
+# Must be defined before importing FluxPipeline.
+if not hasattr(torch, "xpu"):
+    class DummyXPU:
+        @staticmethod
+        def empty_cache():
+            pass
+    torch.xpu = DummyXPU()
+
 from diffusers import FluxPipeline
 from supabase import create_client, Client
 
 
-# ---------------------------------------------------------------------
-# Environment variables required in RunPod Endpoint
-# ---------------------------------------------------------------------
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 SUPABASE_BUCKET = os.environ.get("SUPABASE_BUCKET", "edugauge-gamification-assets")
@@ -30,11 +36,8 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
-# ---------------------------------------------------------------------
-# Load model once during cold start
-# ---------------------------------------------------------------------
-print(f"Loading FLUX model: {FLUX_MODEL_ID}")
-print(f"Using cache directory: {CACHE_DIR}")
+print(f"Loading model: {FLUX_MODEL_ID}")
+print(f"Cache directory: {CACHE_DIR}")
 
 pipe = FluxPipeline.from_pretrained(
     FLUX_MODEL_ID,
@@ -42,24 +45,18 @@ pipe = FluxPipeline.from_pretrained(
     cache_dir=CACHE_DIR,
 )
 
-# Prefer GPU load over CPU offload when GPU has enough VRAM.
-# FLUX.1-schnell typically needs a 24GB GPU for comfortable operation.
-pipe.to("cuda")
+# RTX A5000 has 24GB VRAM. CPU offload is safer for FLUX.
+pipe.enable_model_cpu_offload()
 
-# Optional memory optimization
 try:
     pipe.enable_attention_slicing()
 except Exception:
     pass
 
-print("FLUX model loaded successfully.")
+print("Model loaded successfully.")
 
 
 def upload_to_supabase(image_bytes: bytes, filename: str, folder: str) -> str:
-    """
-    Upload generated image bytes to Supabase Storage and return public URL.
-    Bucket should be public, or your backend should generate signed URLs.
-    """
     bucket_path = f"{folder.strip('/')}/{filename}"
 
     supabase.storage.from_(SUPABASE_BUCKET).upload(
@@ -75,44 +72,33 @@ def upload_to_supabase(image_bytes: bytes, filename: str, folder: str) -> str:
 
 
 def handler(job):
-    """
-    RunPod Serverless handler.
-
-    Expected input:
-    {
-      "input": {
-        "prompt": "child-friendly jungle adventure map background, no text",
-        "negative_prompt": "text, watermark, logo, blurry",
-        "width": 1344,
-        "height": 768,
-        "seed": 123,
-        "num_inference_steps": 4,
-        "guidance_scale": 0.0,
-        "folder": "gamification/themes/jungle-explorer/backgrounds",
-        "quality": 85
-      }
-    }
-    """
     try:
         job_input = job.get("input", {})
 
-        prompt = job_input.get("prompt", "A child-friendly educational adventure map background, no text")
-        negative_prompt = job_input.get("negative_prompt", "text, watermark, logo, blurry, distorted")
+        prompt = job_input.get(
+            "prompt",
+            "Create a child-friendly educational adventure map background, no text."
+        )
+        negative_prompt = job_input.get(
+            "negative_prompt",
+            "text, watermark, logo, blurry, distorted, unsafe"
+        )
+
         width = int(job_input.get("width", 1024))
-        height = int(job_input.get("height", 1024))
+        height = int(job_input.get("height", 768))
         seed = int(job_input.get("seed", 0))
         steps = int(job_input.get("num_inference_steps", 4))
         guidance_scale = float(job_input.get("guidance_scale", 0.0))
         folder = job_input.get("folder", "runpod-generations")
         quality = int(job_input.get("quality", 85))
 
-        # Basic safety limits to avoid accidental huge generations
-        width = max(512, min(width, 1536))
-        height = max(512, min(height, 1536))
+        # Safety limits for RTX A5000.
+        width = max(512, min(width, 1280))
+        height = max(512, min(height, 1024))
         steps = max(1, min(steps, 8))
         quality = max(60, min(quality, 95))
 
-        generator = torch.Generator(device="cuda").manual_seed(seed)
+        generator = torch.Generator(device="cpu").manual_seed(seed)
 
         with torch.inference_mode():
             image = pipe(
@@ -126,7 +112,6 @@ def handler(job):
                 generator=generator,
             ).images[0]
 
-        # Convert image to WEBP in memory
         img_byte_arr = io.BytesIO()
         image.save(img_byte_arr, format="WEBP", quality=quality)
         image_bytes = img_byte_arr.getvalue()
@@ -144,6 +129,8 @@ def handler(job):
             "width": width,
             "height": height,
             "seed": seed,
+            "steps": steps,
+            "guidance_scale": guidance_scale,
             "model": FLUX_MODEL_ID,
         }
 
