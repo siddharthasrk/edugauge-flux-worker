@@ -39,10 +39,13 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 print(f"Loading model: {FLUX_MODEL_ID}")
 print(f"Cache directory: {CACHE_DIR}")
 
+HF_TOKEN = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+
 pipe = FluxPipeline.from_pretrained(
     FLUX_MODEL_ID,
     torch_dtype=torch.bfloat16,
     cache_dir=CACHE_DIR,
+    token=HF_TOKEN,
 )
 
 # RTX A5000 has 24GB VRAM. CPU offload is safer for FLUX.
