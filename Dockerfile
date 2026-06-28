@@ -1,4 +1,4 @@
-FROM runpod/pytorch:1.0.7-cu1290-torch260-ubuntu2204
+FROM pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime
 
 WORKDIR /
 
