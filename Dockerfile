@@ -9,8 +9,8 @@ RUN pip install --no-cache-dir \
     accelerate==0.33.0 \
     sentencepiece \
     protobuf \
-    supabase \
     pillow \
+    supabase \
     safetensors
     
 COPY handler.py /handler.py
